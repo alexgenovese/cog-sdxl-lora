@@ -1,35 +1,9 @@
-import json
 import os
-import re
 import shutil
+import tarfile
+import time 
 import subprocess
-import time
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
-import numpy as np
-import torch
 from cog import BasePredictor, Input, Path
-from diffusers import (
-    DDIMScheduler,
-    DiffusionPipeline,
-    DPMSolverMultistepScheduler,
-    EulerAncestralDiscreteScheduler,
-    EulerDiscreteScheduler,
-    HeunDiscreteScheduler,
-    PNDMScheduler,
-    StableDiffusionXLImg2ImgPipeline,
-    StableDiffusionXLInpaintPipeline,
-)
-from diffusers.models.attention_processor import LoRAAttnProcessor2_0
-from diffusers.pipelines.stable_diffusion.safety_checker import (
-    StableDiffusionSafetyChecker,
-)
-from diffusers.utils import load_image
-from safetensors import safe_open
-from safetensors.torch import load_file
-from transformers import CLIPImageProcessor
-
-from dataset_and_utils import TokenEmbeddingsHandler
 
 SDXL_MODEL_CACHE = "./sdxl-cache"
 REFINER_MODEL_CACHE = "./refiner-cache"
@@ -41,23 +15,6 @@ REFINER_URL = (
 )
 SAFETY_URL = "https://weights.replicate.delivery/default/sdxl/safety-1.0.tar"
 
-
-class KarrasDPM:
-    def from_config(config):
-        return DPMSolverMultistepScheduler.from_config(config, use_karras_sigmas=True)
-
-
-SCHEDULERS = {
-    "DDIM": DDIMScheduler,
-    "DPMSolverMultistep": DPMSolverMultistepScheduler,
-    "HeunDiscrete": HeunDiscreteScheduler,
-    "KarrasDPM": KarrasDPM,
-    "K_EULER_ANCESTRAL": EulerAncestralDiscreteScheduler,
-    "K_EULER": EulerDiscreteScheduler,
-    "PNDM": PNDMScheduler,
-}
-
-
 def download_weights(url, dest):
     start = time.time()
     print("downloading url: ", url)
@@ -65,368 +22,194 @@ def download_weights(url, dest):
     subprocess.check_call(["pget", "-x", url, dest])
     print("downloading took: ", time.time() - start)
 
+from typing import Tuple
+
+from preprocess import preprocess
+from trainer_pti import main
+
+"""
+Wrapper around actual trainer.
+"""
+OUTPUT_DIR = "training_out"
+
+
 
 class Predictor(BasePredictor):
-    def load_trained_weights(self, weights, pipe):
-        local_weights_cache = f"./trained-model"
+    def predict(
+        self,
+        input_images: Path = Input(
+            description="A .zip or .tar file containing the image files that will be used for fine-tuning"
+        ),
+        seed: int = Input(
+            description="Random seed for reproducible training. Leave empty to use a random seed",
+            default=None,
+        ),
+        resolution: int = Input(
+            description="Square pixel resolution which your images will be resized to for training",
+            default=768,
+        ),
+        train_batch_size: int = Input(
+            description="Batch size (per device) for training",
+            default=4,
+        ),
+        num_train_epochs: int = Input(
+            description="Number of epochs to loop through your training dataset",
+            default=4000,
+        ),
+        max_train_steps: int = Input(
+            description="Number of individual training steps. Takes precedence over num_train_epochs",
+            default=1000,
+        ),
+        # gradient_accumulation_steps: int = Input(
+        #     description="Number of training steps to accumulate before a backward pass. Effective batch size = gradient_accumulation_steps * batch_size",
+        #     default=1,
+        # ), # todo.
+        is_lora: bool = Input(
+            description="Whether to use LoRA training. If set to False, will use Full fine tuning",
+            default=True,
+        ),
+        unet_learning_rate: float = Input(
+            description="Learning rate for the U-Net. We recommend this value to be somewhere between `1e-6` to `1e-5`.",
+            default=1e-6,
+        ),
+        ti_lr: float = Input(
+            description="Scaling of learning rate for training textual inversion embeddings. Don't alter unless you know what you're doing.",
+            default=3e-4,
+        ),
+        lora_lr: float = Input(
+            description="Scaling of learning rate for training LoRA embeddings. Don't alter unless you know what you're doing.",
+            default=1e-4,
+        ),
+        lora_rank: int = Input(
+            description="Rank of LoRA embeddings. Don't alter unless you know what you're doing.",
+            default=32,
+        ),
+        lr_scheduler: str = Input(
+            description="Learning rate scheduler to use for training",
+            default="constant",
+            choices=[
+                "constant",
+                "linear",
+            ],
+        ),
+        lr_warmup_steps: int = Input(
+            description="Number of warmup steps for lr schedulers with warmups.",
+            default=100,
+        ),
+        token_string: str = Input(
+            description="A unique string that will be trained to refer to the concept in the input images. Can be anything, but TOK works well",
+            default="TOK",
+        ),
+        # token_map: str = Input(
+        #     description="String of token and their impact size specificing tokens used in the dataset. This will be in format of `token1:size1,token2:size2,...`.",
+        #     default="TOK:2",
+        # ),
+        caption_prefix: str = Input(
+            description="Text which will be used as prefix during automatic captioning. Must contain the `token_string`. For example, if caption text is 'a photo of TOK', automatic captioning will expand to 'a photo of TOK under a bridge', 'a photo of TOK holding a cup', etc.",
+            default="a photo of TOK, ",
+        ),
+        mask_target_prompts: str = Input(
+            description="Prompt that describes part of the image that you will find important. For example, if you are fine-tuning your pet, `photo of a dog` will be a good prompt. Prompt-based masking is used to focus the fine-tuning process on the important/salient parts of the image",
+            default=None,
+        ),
+        crop_based_on_salience: bool = Input(
+            description="If you want to crop the image to `target_size` based on the important parts of the image, set this to True. If you want to crop the image based on face detection, set this to False",
+            default=True,
+        ),
+        use_face_detection_instead: bool = Input(
+            description="If you want to use face detection instead of CLIPSeg for masking. For face applications, we recommend using this option.",
+            default=False,
+        ),
+        clipseg_temperature: float = Input(
+            description="How blurry you want the CLIPSeg mask to be. We recommend this value be something between `0.5` to `1.0`. If you want to have more sharp mask (but thus more errorful), you can decrease this value.",
+            default=1.0,
+        ),
+        verbose: bool = Input(description="verbose output", default=True),
+        checkpointing_steps: int = Input(
+            description="Number of steps between saving checkpoints. Set to very very high number to disable checkpointing, because you don't need one.",
+            default=999999,
+        ),
+        input_images_filetype: str = Input(
+            description="Filetype of the input images. Can be either `zip` or `tar`. By default its `infer`, and it will be inferred from the ext of input file.",
+            default="infer",
+            choices=["zip", "tar", "infer"],
+        ),
+    ) -> Path:
+        # Hard-code token_map for now. Make it configurable once we support multiple concepts or user-uploaded caption csv.
+        token_map = token_string + ":2"
 
-        shutil.rmtree(local_weights_cache, ignore_errors=True)
+        # Process 'token_to_train' and 'input_data_tar_or_zip'
+        inserting_list_tokens = token_map.split(",")
 
-        if not os.path.exists(local_weights_cache):
-            # pget -x doesn't like replicate.delivery
-            weights = str(weights)
-            weights = weights.replace(
-                "replicate.delivery/pbxt", "storage.googleapis.com/replicate-files"
+        token_dict = {}
+        running_tok_cnt = 0
+        all_token_lists = []
+        for token in inserting_list_tokens:
+            n_tok = int(token.split(":")[1])
+
+            token_dict[token.split(":")[0]] = "".join(
+                [f"<s{i + running_tok_cnt}>" for i in range(n_tok)]
             )
-            download_weights(weights, local_weights_cache)
+            all_token_lists.extend([f"<s{i + running_tok_cnt}>" for i in range(n_tok)])
 
-        # load UNET
-        print("Loading fine-tuned model")
-        self.is_lora = False
+            running_tok_cnt += n_tok
 
-        maybe_unet_path = os.path.join(local_weights_cache, "unet.safetensors")
-        if not os.path.exists(maybe_unet_path):
-            print("Does not have Unet. assume we are using LoRA")
-            self.is_lora = True
-
-        if not self.is_lora:
-            print("Loading Unet")
-
-            new_unet_params = load_file(
-                os.path.join(local_weights_cache, "unet.safetensors")
-            )
-            sd = pipe.unet.state_dict()
-            sd.update(new_unet_params)
-            pipe.unet.load_state_dict(sd)
-
-        else:
-            print("Loading Unet LoRA")
-
-            unet = pipe.unet
-
-            tensors = load_file(os.path.join(local_weights_cache, "lora.safetensors"))
-
-            unet = pipe.unet
-            unet_lora_attn_procs = {}
-            name_rank_map = {}
-            for tk, tv in tensors.items():
-                # up is N, d
-                if tk.endswith("up.weight"):
-                    proc_name = ".".join(tk.split(".")[:-3])
-                    r = tv.shape[1]
-                    name_rank_map[proc_name] = r
-
-            for name, attn_processor in unet.attn_processors.items():
-                cross_attention_dim = (
-                    None
-                    if name.endswith("attn1.processor")
-                    else unet.config.cross_attention_dim
-                )
-                if name.startswith("mid_block"):
-                    hidden_size = unet.config.block_out_channels[-1]
-                elif name.startswith("up_blocks"):
-                    block_id = int(name[len("up_blocks.")])
-                    hidden_size = list(reversed(unet.config.block_out_channels))[
-                        block_id
-                    ]
-                elif name.startswith("down_blocks"):
-                    block_id = int(name[len("down_blocks.")])
-                    hidden_size = unet.config.block_out_channels[block_id]
-
-                module = LoRAAttnProcessor2_0(
-                    hidden_size=hidden_size,
-                    cross_attention_dim=cross_attention_dim,
-                    rank=name_rank_map[name],
-                )
-                unet_lora_attn_procs[name] = module.to("cuda")
-
-            unet.set_attn_processor(unet_lora_attn_procs)
-            unet.load_state_dict(tensors, strict=False)
-
-        # load text
-        handler = TokenEmbeddingsHandler(
-            [pipe.text_encoder, pipe.text_encoder_2], [pipe.tokenizer, pipe.tokenizer_2]
+        input_dir = preprocess(
+            input_images_filetype=input_images_filetype,
+            input_zip_path=input_images,
+            caption_text=caption_prefix,
+            mask_target_prompts=mask_target_prompts,
+            target_size=resolution,
+            crop_based_on_salience=crop_based_on_salience,
+            use_face_detection_instead=use_face_detection_instead,
+            temp=clipseg_temperature,
+            substitution_tokens=list(token_dict.keys()),
         )
-        handler.load_embeddings(os.path.join(local_weights_cache, "embeddings.pti"))
-
-        # load params
-        with open(os.path.join(local_weights_cache, "special_params.json"), "r") as f:
-            params = json.load(f)
-        self.token_map = params
-        self.tuned_model = True
-
-    def setup(self, weights: Optional[Path] = None):
-        """Load the model into memory to make running multiple predictions efficient"""
-        print(weights)
-        start = time.time()
-        self.tuned_model = False
-
-        print("Loading safety checker...")
-        if not os.path.exists(SAFETY_CACHE):
-            download_weights(SAFETY_URL, SAFETY_CACHE)
-        self.safety_checker = StableDiffusionSafetyChecker.from_pretrained(
-            SAFETY_CACHE, torch_dtype=torch.float16
-        ).to("cuda")
-        self.feature_extractor = CLIPImageProcessor.from_pretrained(FEATURE_EXTRACTOR)
 
         if not os.path.exists(SDXL_MODEL_CACHE):
             download_weights(SDXL_URL, SDXL_MODEL_CACHE)
+        if os.path.exists(OUTPUT_DIR):
+            shutil.rmtree(OUTPUT_DIR)
+        os.makedirs(OUTPUT_DIR)
 
-        print("Loading sdxl txt2img pipeline...")
-        self.txt2img_pipe = DiffusionPipeline.from_pretrained(
-            SDXL_MODEL_CACHE,
-            torch_dtype=torch.float16,
-            use_safetensors=True,
-            variant="fp16",
+        main(
+            pretrained_model_name_or_path=SDXL_MODEL_CACHE,
+            instance_data_dir=os.path.join(input_dir, "captions.csv"),
+            output_dir=OUTPUT_DIR,
+            seed=seed,
+            resolution=resolution,
+            train_batch_size=train_batch_size,
+            num_train_epochs=num_train_epochs,
+            max_train_steps=max_train_steps,
+            gradient_accumulation_steps=1,
+            unet_learning_rate=unet_learning_rate,
+            ti_lr=ti_lr,
+            lora_lr=lora_lr,
+            lr_scheduler=lr_scheduler,
+            lr_warmup_steps=lr_warmup_steps,
+            token_dict=token_dict,
+            inserting_list_tokens=all_token_lists,
+            verbose=verbose,
+            checkpointing_steps=checkpointing_steps,
+            scale_lr=False,
+            max_grad_norm=1.0,
+            allow_tf32=True,
+            mixed_precision="bf16",
+            device="cuda:0",
+            lora_rank=lora_rank,
+            is_lora=is_lora,
         )
-        self.is_lora = False
-        if weights:
-            self.load_trained_weights(weights, self.txt2img_pipe)
+        
 
-        self.txt2img_pipe.to("cuda")
+        directory = Path(OUTPUT_DIR)
+        out_path = "trained_model.tar"
+        with tarfile.open(out_path, "w") as tar:
+            for file_path in directory.rglob("*"):
+                print(file_path)
+                arcname = file_path.relative_to(directory)
+                tar.add(file_path, arcname=arcname)
 
-        print("Loading SDXL img2img pipeline...")
-        self.img2img_pipe = StableDiffusionXLImg2ImgPipeline(
-            vae=self.txt2img_pipe.vae,
-            text_encoder=self.txt2img_pipe.text_encoder,
-            text_encoder_2=self.txt2img_pipe.text_encoder_2,
-            tokenizer=self.txt2img_pipe.tokenizer,
-            tokenizer_2=self.txt2img_pipe.tokenizer_2,
-            unet=self.txt2img_pipe.unet,
-            scheduler=self.txt2img_pipe.scheduler,
-        )
-        self.img2img_pipe.to("cuda")
+        # return TrainingOutput(weights=Path(out_path))
 
-        print("Loading SDXL inpaint pipeline...")
-        self.inpaint_pipe = StableDiffusionXLInpaintPipeline(
-            vae=self.txt2img_pipe.vae,
-            text_encoder=self.txt2img_pipe.text_encoder,
-            text_encoder_2=self.txt2img_pipe.text_encoder_2,
-            tokenizer=self.txt2img_pipe.tokenizer,
-            tokenizer_2=self.txt2img_pipe.tokenizer_2,
-            unet=self.txt2img_pipe.unet,
-            scheduler=self.txt2img_pipe.scheduler,
-        )
-        self.inpaint_pipe.to("cuda")
+        return Path(out_path)
 
-        print("Loading SDXL refiner pipeline...")
-        # FIXME(ja): should the vae/text_encoder_2 be loaded from SDXL always?
-        #            - in the case of fine-tuned SDXL should we still?
-        # FIXME(ja): if the answer to above is use VAE/Text_Encoder_2 from fine-tune
-        #            what does this imply about lora + refiner? does the refiner need to know about
-
-        if not os.path.exists(REFINER_MODEL_CACHE):
-            download_weights(REFINER_URL, REFINER_MODEL_CACHE)
-
-        print("Loading refiner pipeline...")
-        self.refiner = DiffusionPipeline.from_pretrained(
-            REFINER_MODEL_CACHE,
-            text_encoder_2=self.txt2img_pipe.text_encoder_2,
-            vae=self.txt2img_pipe.vae,
-            torch_dtype=torch.float16,
-            use_safetensors=True,
-            variant="fp16",
-        )
-        self.refiner.to("cuda")
-        print("setup took: ", time.time() - start)
-        # self.txt2img_pipe.__class__.encode_prompt = new_encode_prompt
-
-    def load_image(self, path):
-        shutil.copyfile(path, "/tmp/image.png")
-        return load_image("/tmp/image.png").convert("RGB")
-
-    def run_safety_checker(self, image):
-        safety_checker_input = self.feature_extractor(image, return_tensors="pt").to(
-            "cuda"
-        )
-        np_image = [np.array(val) for val in image]
-        image, has_nsfw_concept = self.safety_checker(
-            images=np_image,
-            clip_input=safety_checker_input.pixel_values.to(torch.float16),
-        )
-        return image, has_nsfw_concept
-
-
-    @torch.inference_mode()
-    def predict(
-        self,
-        prompt: str = Input(
-            description="Input prompt",
-            default="An astronaut riding a rainbow unicorn",
-        ),
-        negative_prompt: str = Input(
-            description="Input Negative Prompt",
-            default="",
-        ),
-        image: Path = Input(
-            description="Input image for img2img or inpaint mode",
-            default=None,
-        ),
-        mask: Path = Input(
-            description="Input mask for inpaint mode. Black areas will be preserved, white areas will be inpainted.",
-            default=None,
-        ),
-        width: int = Input(
-            description="Width of output image",
-            default=1024,
-        ),
-        height: int = Input(
-            description="Height of output image",
-            default=1024,
-        ),
-        num_outputs: int = Input(
-            description="Number of images to output.",
-            ge=1,
-            le=4,
-            default=1,
-        ),
-        scheduler: str = Input(
-            description="scheduler",
-            choices=SCHEDULERS.keys(),
-            default="K_EULER",
-        ),
-        num_inference_steps: int = Input(
-            description="Number of denoising steps", ge=1, le=500, default=50
-        ),
-        guidance_scale: float = Input(
-            description="Scale for classifier-free guidance", ge=1, le=50, default=7.5
-        ),
-        prompt_strength: float = Input(
-            description="Prompt strength when using img2img / inpaint. 1.0 corresponds to full destruction of information in image",
-            ge=0.0,
-            le=1.0,
-            default=0.8,
-        ),
-        seed: int = Input(
-            description="Random seed. Leave blank to randomize the seed", default=None
-        ),
-        refine: str = Input(
-            description="Which refine style to use",
-            choices=["no_refiner", "expert_ensemble_refiner", "base_image_refiner"],
-            default="no_refiner",
-        ),
-        high_noise_frac: float = Input(
-            description="For expert_ensemble_refiner, the fraction of noise to use",
-            default=0.8,
-            le=1.0,
-            ge=0.0,
-        ),
-        refine_steps: int = Input(
-            description="For base_image_refiner, the number of steps to refine, defaults to num_inference_steps",
-            default=None,
-        ),
-        apply_watermark: bool = Input(
-            description="Applies a watermark to enable determining if an image is generated in downstream applications. If you have other provisions for generating or deploying images safely, you can use this to disable watermarking.",
-            default=True,
-        ),
-        lora_scale: float = Input(
-            description="LoRA additive scale. Only applicable on trained models.",
-            ge=0.0,
-            le=1.0,
-            default=0.6,
-        ),
-        lora_url: str = Input(
-            description="LoRA URLs. Can be tar or safetensor format.",
-            default=None,
-        ),
-    ) -> List[Path]:
-        """Run a single prediction on the model"""
-        if seed is None:
-            seed = int.from_bytes(os.urandom(2), "big")
-        print(f"Using seed: {seed}")
-        start = time.time()
-
-        if lora_url:
-            self.load_trained_weights(lora_url, self.txt2img_pipe)
-        else:
-            raise Exception("lora_url is required")
-
-        print(f"Time took to load lora: {time.time() - start}")
-        sdxl_kwargs = {}
-        if self.tuned_model:
-            # consistency with fine-tuning API
-            for k, v in self.token_map.items():
-                prompt = prompt.replace(k, v)
-
-        print(f"Prompt: {prompt}")
-
-        if image and mask:
-            print("inpainting mode")
-            sdxl_kwargs["image"] = self.load_image(image)
-            sdxl_kwargs["mask_image"] = self.load_image(mask)
-            sdxl_kwargs["strength"] = prompt_strength
-            sdxl_kwargs["width"] = width
-            sdxl_kwargs["height"] = height
-            pipe = self.inpaint_pipe
-        elif image:
-            print("img2img mode")
-            sdxl_kwargs["image"] = self.load_image(image)
-            sdxl_kwargs["strength"] = prompt_strength
-            pipe = self.img2img_pipe
-        else:
-            print("txt2img mode")
-            sdxl_kwargs["width"] = width
-            sdxl_kwargs["height"] = height
-            pipe = self.txt2img_pipe
-
-        if refine == "expert_ensemble_refiner":
-            sdxl_kwargs["output_type"] = "latent"
-            sdxl_kwargs["denoising_end"] = high_noise_frac
-        elif refine == "base_image_refiner":
-            sdxl_kwargs["output_type"] = "latent"
-
-        if not apply_watermark:
-            # toggles watermark for this prediction
-            watermark_cache = pipe.watermark
-            pipe.watermark = None
-            self.refiner.watermark = None
-
-        pipe.scheduler = SCHEDULERS[scheduler].from_config(pipe.scheduler.config)
-        generator = torch.Generator("cuda").manual_seed(seed)
-
-        common_args = {
-            "prompt": [prompt] * num_outputs,
-            "negative_prompt": [negative_prompt] * num_outputs,
-            "guidance_scale": guidance_scale,
-            "generator": generator,
-            "num_inference_steps": num_inference_steps,
-        }
-
-        if self.is_lora:
-            sdxl_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
-
-        output = pipe(**common_args, **sdxl_kwargs)
-
-        if refine in ["expert_ensemble_refiner", "base_image_refiner"]:
-            refiner_kwargs = {
-                "image": output.images,
-            }
-
-            if refine == "expert_ensemble_refiner":
-                refiner_kwargs["denoising_start"] = high_noise_frac
-            if refine == "base_image_refiner" and refine_steps:
-                common_args["num_inference_steps"] = refine_steps
-
-            output = self.refiner(**common_args, **refiner_kwargs)
-
-        if not apply_watermark:
-            pipe.watermark = watermark_cache
-            self.refiner.watermark = watermark_cache
-
-        _, has_nsfw_content = self.run_safety_checker(output.images)
-
-        output_paths = []
-        for i, nsfw in enumerate(has_nsfw_content):
-            if nsfw:
-                print(f"NSFW content detected in image {i}")
-                continue
-            output_path = f"/tmp/out-{i}.png"
-            output.images[i].save(output_path)
-            output_paths.append(Path(output_path))
-
-        if len(output_paths) == 0:
-            raise Exception(
-                f"NSFW content detected. Try running it again, or try a different prompt."
-            )
-
-        return output_paths
