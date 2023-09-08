@@ -46,15 +46,15 @@ class Predictor(BasePredictor):
         ),
         resolution: int = Input(
             description="Square pixel resolution which your images will be resized to for training",
-            default=768,
+            default=1024,
         ),
         train_batch_size: int = Input(
             description="Batch size (per device) for training",
-            default=4,
+            default=3,
         ),
         num_train_epochs: int = Input(
             description="Number of epochs to loop through your training dataset",
-            default=4000,
+            default=50,
         ),
         max_train_steps: int = Input(
             description="Number of individual training steps. Takes precedence over num_train_epochs",
@@ -70,19 +70,19 @@ class Predictor(BasePredictor):
         ),
         unet_learning_rate: float = Input(
             description="Learning rate for the U-Net. We recommend this value to be somewhere between `1e-6` to `1e-5`.",
-            default=1e-6,
+            default=3e-06,
         ),
         ti_lr: float = Input(
             description="Scaling of learning rate for training textual inversion embeddings. Don't alter unless you know what you're doing.",
-            default=3e-4,
+            default=3e-05,
         ),
         lora_lr: float = Input(
             description="Scaling of learning rate for training LoRA embeddings. Don't alter unless you know what you're doing.",
-            default=1e-4,
+            default=4e-4,
         ),
         lora_rank: int = Input(
             description="Rank of LoRA embeddings. Don't alter unless you know what you're doing.",
-            default=32,
+            default=64,
         ),
         lr_scheduler: str = Input(
             description="Learning rate scheduler to use for training",
@@ -90,11 +90,12 @@ class Predictor(BasePredictor):
             choices=[
                 "constant",
                 "linear",
+                "cosine"
             ],
         ),
         lr_warmup_steps: int = Input(
             description="Number of warmup steps for lr schedulers with warmups.",
-            default=100,
+            default=0,
         ),
         token_string: str = Input(
             description="A unique string that will be trained to refer to the concept in the input images. Can be anything, but TOK works well",
