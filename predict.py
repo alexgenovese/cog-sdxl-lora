@@ -3,18 +3,28 @@ import shutil
 import tarfile
 import time 
 import subprocess
+import random # to generate random string for token
+# for Replicate input parameters
 from cog import BasePredictor, Input, Path
+from typing import Tuple
+# Before starting the training process
+from preprocess import preprocess
+# Class for training LoRA
+from trainer_pti import main
 
+# Defining Static Variables
 SDXL_MODEL_CACHE = "./sdxl-cache"
-REFINER_MODEL_CACHE = "./refiner-cache"
-SAFETY_CACHE = "./safety-cache"
-FEATURE_EXTRACTOR = "./feature-extractor"
 SDXL_URL = "https://weights.replicate.delivery/default/sdxl/sdxl-vae-fix-1.0.tar"
-REFINER_URL = (
-    "https://weights.replicate.delivery/default/sdxl/refiner-no-vae-no-encoder-1.0.tar"
-)
-SAFETY_URL = "https://weights.replicate.delivery/default/sdxl/safety-1.0.tar"
+FEATURE_EXTRACTOR = "./feature-extractor"
+OUTPUT_DIR = "training_out"
+# SAFETY_CACHE = "./safety-cache"
+# SAFETY_URL = "https://weights.replicate.delivery/default/sdxl/safety-1.0.tar"
+# REFINER_MODEL_CACHE = "./refiner-cache"
+# REFINER_URL = "https://weights.replicate.delivery/default/sdxl/refiner-no-vae-no-encoder-1.0.tar"
+TOKEN_STRING = ''
 
+# Global functions
+## Download the models if not present in cache folder yet
 def download_weights(url, dest):
     start = time.time()
     print("downloading url: ", url)
@@ -22,19 +32,17 @@ def download_weights(url, dest):
     subprocess.check_call(["pget", "-x", url, dest])
     print("downloading took: ", time.time() - start)
 
-from typing import Tuple
-
-from preprocess import preprocess
-from trainer_pti import main
-
-"""
-Wrapper around actual trainer.
-"""
-OUTPUT_DIR = "training_out"
-
-
+## generate a token string
+def getRandomToken(length):
+    if length is None:
+        length = 5
+    
+    return ''.join((random.choice('abcdefgjhiklmnopqrstuvwz') for i in range(length)))
 
 class Predictor(BasePredictor):
+    def setup(self):
+        TOKEN_STRING = getRandomToken()
+
     def predict(
         self,
         input_images: Path = Input(
@@ -54,7 +62,7 @@ class Predictor(BasePredictor):
         ),
         num_train_epochs: int = Input(
             description="Number of epochs to loop through your training dataset",
-            default=50,
+            default=4000,
         ),
         max_train_steps: int = Input(
             description="Number of individual training steps. Takes precedence over num_train_epochs",
@@ -70,7 +78,7 @@ class Predictor(BasePredictor):
         ),
         unet_learning_rate: float = Input(
             description="Learning rate for the U-Net. We recommend this value to be somewhere between `1e-6` to `1e-5`.",
-            default=3e-06,
+            default=3e-06, #0,000003
         ),
         ti_lr: float = Input(
             description="Scaling of learning rate for training textual inversion embeddings. Don't alter unless you know what you're doing.",
@@ -82,7 +90,7 @@ class Predictor(BasePredictor):
         ),
         lora_rank: int = Input(
             description="Rank of LoRA embeddings. Don't alter unless you know what you're doing.",
-            default=64,
+            default=32,
         ),
         lr_scheduler: str = Input(
             description="Learning rate scheduler to use for training",
@@ -99,7 +107,7 @@ class Predictor(BasePredictor):
         ),
         token_string: str = Input(
             description="A unique string that will be trained to refer to the concept in the input images. Can be anything, but TOK works well",
-            default="TOK",
+            default=TOKEN_STRING,
         ),
         # token_map: str = Input(
         #     description="String of token and their impact size specificing tokens used in the dataset. This will be in format of `token1:size1,token2:size2,...`.",
@@ -107,7 +115,7 @@ class Predictor(BasePredictor):
         # ),
         caption_prefix: str = Input(
             description="Text which will be used as prefix during automatic captioning. Must contain the `token_string`. For example, if caption text is 'a photo of TOK', automatic captioning will expand to 'a photo of TOK under a bridge', 'a photo of TOK holding a cup', etc.",
-            default="a photo of TOK, ",
+            default="a photo of "+TOKEN_STRING,
         ),
         mask_target_prompts: str = Input(
             description="Prompt that describes part of the image that you will find important. For example, if you are fine-tuning your pet, `photo of a dog` will be a good prompt. Prompt-based masking is used to focus the fine-tuning process on the important/salient parts of the image",
