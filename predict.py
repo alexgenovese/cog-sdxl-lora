@@ -33,11 +33,8 @@ def download_weights(url, dest):
     print("downloading took: ", time.time() - start)
 
 ## generate a token string
-def getRandomToken(length):
-    if length is None:
-        length = 5
-    
-    return ''.join((random.choice('abcdefgjhiklmnopqrstuvwz') for i in range(length)))
+def getRandomToken():
+    return ''.join((random.choice('abcdefgjhiklmnopqrstuvwz') for i in range(5)))
 
 class Predictor(BasePredictor):
     def setup(self):
