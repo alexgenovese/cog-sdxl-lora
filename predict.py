@@ -21,7 +21,6 @@ OUTPUT_DIR = "training_out"
 # SAFETY_URL = "https://weights.replicate.delivery/default/sdxl/safety-1.0.tar"
 # REFINER_MODEL_CACHE = "./refiner-cache"
 # REFINER_URL = "https://weights.replicate.delivery/default/sdxl/refiner-no-vae-no-encoder-1.0.tar"
-TOKEN_STRING = ''
 
 # Global functions
 ## Download the models if not present in cache folder yet
@@ -32,14 +31,7 @@ def download_weights(url, dest):
     subprocess.check_call(["pget", "-x", url, dest])
     print("downloading took: ", time.time() - start)
 
-## generate a token string
-def getRandomToken():
-    return ''.join((random.choice('abcdefgjhiklmnopqrstuvwz') for i in range(5)))
-
 class Predictor(BasePredictor):
-    def setup(self):
-        TOKEN_STRING = getRandomToken()
-
     def predict(
         self,
         input_images: Path = Input(
@@ -104,7 +96,7 @@ class Predictor(BasePredictor):
         ),
         token_string: str = Input(
             description="A unique string that will be trained to refer to the concept in the input images. Can be anything, but TOK works well",
-            default=TOKEN_STRING,
+            default="siduhc",
         ),
         # token_map: str = Input(
         #     description="String of token and their impact size specificing tokens used in the dataset. This will be in format of `token1:size1,token2:size2,...`.",
@@ -112,7 +104,7 @@ class Predictor(BasePredictor):
         # ),
         caption_prefix: str = Input(
             description="Text which will be used as prefix during automatic captioning. Must contain the `token_string`. For example, if caption text is 'a photo of TOK', automatic captioning will expand to 'a photo of TOK under a bridge', 'a photo of TOK holding a cup', etc.",
-            default="a photo of "+TOKEN_STRING,
+            default="a photo of siduhc",
         ),
         mask_target_prompts: str = Input(
             description="Prompt that describes part of the image that you will find important. For example, if you are fine-tuning your pet, `photo of a dog` will be a good prompt. Prompt-based masking is used to focus the fine-tuning process on the important/salient parts of the image",
