@@ -9,7 +9,7 @@ from typing import List, Optional
 import numpy as np
 import torch
 import torch.utils.checkpoint
-from diffusers.models.attention_processor import LoRAAttnProcessor, LoRAAttnProcessor2_0
+from diffusers.models.attention_processor import LoRAAttnProcessor2_0
 from diffusers.optimization import get_scheduler
 from safetensors.torch import save_file
 from tqdm.auto import tqdm
@@ -228,9 +228,6 @@ def main(
         power=lr_power,
     )
 
-    num_update_steps_per_epoch = math.ceil(
-        len(train_dataloader) / gradient_accumulation_steps
-    )
     num_train_epochs = math.ceil(max_train_steps / num_update_steps_per_epoch)
 
     total_batch_size = train_batch_size * gradient_accumulation_steps
