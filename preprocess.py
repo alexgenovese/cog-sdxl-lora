@@ -1,7 +1,7 @@
 # Have SwinIR upsample
-# Have BLIP auto caption
+# Have BLIP2 auto caption
 # Have CLIPSeg auto mask concept
-
+import time 
 import gc
 import fnmatch
 import mimetypes
@@ -12,7 +12,7 @@ import tarfile
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple, Union
 from zipfile import ZipFile
-
+# from rembg import remove # remove background from image
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -21,17 +21,39 @@ import torch
 from PIL import Image, ImageFilter
 from tqdm import tqdm
 from transformers import (
+    Blip2Processor,
     BlipForConditionalGeneration,
-    BlipProcessor,
     CLIPSegForImageSegmentation,
     CLIPSegProcessor,
     Swin2SRForImageSuperResolution,
-    Swin2SRImageProcessor,
+    Swin2SRImageProcessor
 )
 
-MODEL_PATH = "./cache"
+MODEL_PATH = "./preprocess-cache"
 TEMP_OUT_DIR = "./temp/"
 TEMP_IN_DIR = "./temp_in/"
+
+BLIP2_REPO_ID = "Salesforce/blip2-opt-2.7b"
+BLIP_2_FOLDER = "/Blip2"
+CIDAS_REPO_ID = "CIDAS/clipseg-rd64-refined"
+CIDAS_FOLDER = "/CIDAS"
+UPSCALER_REPO_ID = "caidas/swin2SR-realworld-sr-x4-64-bsrgan-psnr"
+UPSCALER_FOLDER = "/Caidas"
+
+def download_weights(repo_id, dest):
+    start = time.time()
+    print("creating folder: " + dest)
+    os.makedirs(dest)
+    print("downloading repo from Huggingface: ")
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type="model",
+        cache_dir=dest,
+        resume_download=True,
+        force_download=True,
+        token="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"
+    )
+    print("downloading took: ", time.time() - start)
 
 
 def preprocess(
@@ -119,7 +141,7 @@ def swin_ir_sr(
     """
 
     model = Swin2SRForImageSuperResolution.from_pretrained(
-        model_id, cache_dir=MODEL_PATH
+        model_id, cache_dir=MODEL_PATH+UPSCALER_FOLDER
     ).to(device)
     processor = Swin2SRImageProcessor()
 
@@ -172,9 +194,9 @@ def clipseg_mask_generator(
 
         target_prompts = [target_prompts] * len(images)
 
-    processor = CLIPSegProcessor.from_pretrained(model_id, cache_dir=MODEL_PATH)
+    processor = CLIPSegProcessor.from_pretrained(model_id, cache_dir=MODEL_PATH+CIDAS_FOLDER)
     model = CLIPSegForImageSegmentation.from_pretrained(
-        model_id, cache_dir=MODEL_PATH
+        model_id, cache_dir=MODEL_PATH+CIDAS_FOLDER
     ).to(device)
 
     masks = []
@@ -215,7 +237,8 @@ def blip_captioning_dataset(
     model_id: Literal[
         "Salesforce/blip-image-captioning-large",
         "Salesforce/blip-image-captioning-base",
-    ] = "Salesforce/blip-image-captioning-large",
+        "Salesforce/blip2-opt-2.7b"
+    ] = "Salesforce/blip2-opt-2.7b", # Added BLIP2 as default
     device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     substitution_tokens: Optional[List[str]] = None,
     **kwargs,
@@ -223,19 +246,15 @@ def blip_captioning_dataset(
     """
     Returns a list of captions for the given images
     """
-    processor = BlipProcessor.from_pretrained(model_id, cache_dir=MODEL_PATH)
-    model = BlipForConditionalGeneration.from_pretrained(
-        model_id, cache_dir=MODEL_PATH
-    ).to(device)
+    processor = Blip2Processor.from_pretrained(model_id, cache_dir=MODEL_PATH+BLIP_2_FOLDER, torch_dtype=torch.float16)
+    model = BlipForConditionalGeneration.from_pretrained(model_id, cache_dir=MODEL_PATH+BLIP_2_FOLDER, torch_dtype=torch.float16).to(device)
     captions = []
     text = text.strip()
     print(f"Input captioning text: {text}")
     for image in tqdm(images):
-        inputs = processor(image, return_tensors="pt").to("cuda")
-        out = model.generate(
-            **inputs, max_length=150, do_sample=True, top_k=50, temperature=0.7
-        )
-        caption = processor.decode(out[0], skip_special_tokens=True)
+        inputs = processor(images=image, return_tensors="pt").to(device, torch.float16)
+        out = model.generate(**inputs)
+        caption = processor.batch_decode(out[0], skip_special_tokens=True)[0].strip()
 
         # BLIP 2 lowercases all caps tokens. This should properly replace them w/o messing up subwords. I'm sure there's a better way to do this.
         for token in substitution_tokens:
@@ -475,6 +494,12 @@ def load_and_save_masks_and_captions(
         files = sorted(files)[:n_length]
         print(files)
     images = [Image.open(file).convert("RGB") for file in files]
+
+    # captions
+    print(f"Removing background {len(images)}...")
+#    for image in images:
+#        cleaned_image = remove(input)
+
 
     # captions
     print(f"Generating {len(images)} captions...")

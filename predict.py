@@ -151,7 +151,8 @@ class Predictor(BasePredictor):
             all_token_lists.extend([f"<s{i + running_tok_cnt}>" for i in range(n_tok)])
 
             running_tok_cnt += n_tok
-
+       
+        # Prepare for training
         input_dir = preprocess(
             input_images_filetype=input_images_filetype,
             input_zip_path=input_images,
