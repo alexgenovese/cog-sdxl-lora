@@ -1,42 +1,14 @@
-# Cog-SDXL
+# COG Based on Realistic Vision XL 4.0 - Use any LoRA model
 
-[![Replicate demo and cloud API](https://replicate.com/stability-ai/sdxl/badge)](https://replicate.com/stability-ai/sdxl)
+This is an implementation of a blend of technologies in a Cog model, it works on Mac (M1, M2, M3) and CUDA machines.
 
-This is an implementation of the [SDXL](https://github.com/Stability-AI/generative-models) as a Cog model. [Cog packages machine learning models as standard containers](https://github.com/replicate/cog).
+[![Replicate demo and cloud API](https://replicate.com/alexgenovese/sdxl-lora/badge)](https://replicate.com/alexgenovese/sdxl-lora)
 
-## Development
+# Test it on Replicate
+Go to replicate to test this endpoint [clicking here](https://replicate.com/alexgenovese/sdxl-lora)
 
-Follow the [model pushing guide](https://replicate.com/docs/guides/push-a-model) to push your own fork of SDXL to [Replicate](https://replicate.com).
+# How it works 
 
-## Basic Usage
-
-for prediction,
-
-```bash
-cog predict -i prompt="a photo of TOK"
-```
-
-```bash
-cog train -i input_images=@example_datasets/__data.zip -i use_face_detection_instead=True
-```
-
-```bash
-cog run -p 5000 python -m cog.server.http
-```
-
-## Update notes
-
-**2023-08-17**
-* ROI problem is fixed.
-* Now BLIP caption_prefix does not interfere with BLIP captioner.
-* Now lora_url can be used to accept lora models from the web.
-
-
-**2023-08-12**
-* Input types are inferred from input name extensions, or from the `input_images_filetype` argument
-* Preprocssing are now done with fp16, and if no mask is found, the model will use the whole image
-
-**2023-08-11**
-* Default to 768x768 resolution training
-* Rank as argument now, default to 32
-* Now uses Swin2SR `caidas/swin2SR-realworld-sr-x4-64-bsrgan-psnr` as default, and will upscale + downscale to 768x768
+1. Setup your custom parameters 
+2. Paste the LoRA link .TAR file - This file should contain any lora model named in **unet.safetensors**
+3. Run the inference 
